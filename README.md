@@ -12,6 +12,7 @@ circup install adafruit-circuitpython-ntp
 circup install adafruit-circuitpython-requests
 circup install adafruit_connection_manager
 circup install adafruit_httpserver
+circup install asyncio
 ```
 # settings.toml
 ```

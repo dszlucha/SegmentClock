@@ -15,8 +15,9 @@ from adafruit_ht16k33 import segments
 from adafruit_httpserver import Server, Request, Response
 import adafruit_ntp
 import adafruit_requests
+import asyncio
 
-def isDoNotDistrub():
+def is_do_not_distrub() -> bool:
     """is do not disturb"""
     now = time.time()
     tm = time.localtime(now)
@@ -30,17 +31,8 @@ def isDoNotDistrub():
     else:
         return True
 
-def setBrightness():
-    """set display brightness to highest during sunlight and lowest after sunset"""
-    dt = time.time()
-    if dt > sunrise and dt < sunset:
-        display.brightness = 1.0
-    else:
-        display.brightness = 0.0
-
-def getWeather():
+async def get_open_weather():
     """Get weather data including timezone"""
-    global conditions
     global last_weather
     global sunrise
     global sunset
@@ -49,62 +41,47 @@ def getWeather():
     global weather_data
     url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&units={units}&appid={apikey}"
 
-    display.bottom_left_dot = True
+    while True:
+        display.bottom_left_dot = True
 
-    try:      
-        with requests.get(url) as response:
-            weather_data = response.json()
-    except:
-        return False
+        try:      
+            with requests.get(url) as response:
+                weather_data = response.json()
+            display.bottom_left_dot = False
+            last_weather = time.time()
+        except:
+            pass
 
-    display.bottom_left_dot = False
+        dt = weather_data['dt']
+        sunrise = weather_data['sys']['sunrise']
+        sunset = weather_data['sys']['sunset']
+        temperature = weather_data['main']['temp']
+        timezone = weather_data['timezone']
 
-    last_weather = time.time()
+        if dt > sunrise and dt < sunset:
+            display.brightness = 1.0
+        else:
+            display.brightness = 0.0
+        await asyncio.sleep(300)
 
-    conditions = weather_data['weather'][0]['main']
-    if conditions == 'Thunderstorm':
-        conditions = 'Thdr'
-    elif conditions == 'Drizzle':
-        conditions = 'Drzl'
-    elif conditions == 'Atmosphere':
-        conditions = 'Atms'
-    elif conditions == 'Clear':
-        conditions = 'Clr '
-    elif conditions == 'Clouds':
-        conditions = 'Clds'
-
-    dt = weather_data['dt']
-    sunrise = weather_data['sys']['sunrise']
-    sunset = weather_data['sys']['sunset']
-    temperature = weather_data['main']['temp']
-    timezone = weather_data['timezone']
-
-    if dt > sunrise and dt < sunset:
-        display.brightness = 1.0
-    else:
-        display.brightness = 0.0
-
-    return True
-
-def GetNTPTime():
+async def get_ntp_time():
     """Set time from NTP"""
     global last_ntp
-    try:
-        ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=timezone/3600, cache_seconds=3600)
-    except:
-        return False
-    
-    rtc.RTC().datetime = ntp.datetime
-    last_ntp = time.time()
+    while True:
+        try:
+            ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=timezone/3600, cache_seconds=3600)
+            rtc.RTC().datetime = ntp.datetime
+            last_ntp = time.time()
+        except:
+            pass
+        await asyncio.sleep(86400)
 
-    return True
-
-def getFormattedTime(epoch):
+def get_formatted_time(epoch: float) -> str:
     """Returns formatted time given an epoch"""
     tm = time.localtime(epoch)
     return f'{tm.tm_year}-{tm.tm_mon:02}-{tm.tm_mday:02} {tm.tm_hour:02}:{tm.tm_min:02}:{tm.tm_sec:02}'
 
-def getUptime(uptime):
+def get_uptime(uptime: float) -> str:
     """Compute uptime given number of seconds"""
     days = int(uptime / 86400)
     hours = int((uptime - (days * 86400)) / 3600)
@@ -112,27 +89,53 @@ def getUptime(uptime):
     seconds = int((uptime - (days * 86400) - (hours * 3600) - (minutes * 60)))
     return f'{days} days, {hours} hours, {minutes} minutes, {seconds} seconds'
 
-def displayTime():
+def display_time(show_colon: bool=True):
     """Display time"""
     hour = (time.localtime().tm_hour + 11) % 12 + 1
     minute = time.localtime().tm_min
     display.print("{:>2}".format(hour) + "{:02d}".format(minute))
-    display.colons[0] = colon
+    display.colons[0] = show_colon
     if time.localtime().tm_hour > 11:
         display.top_left_dot = True
     else:
         display.top_left_dot = False
 
-def displayTemperature():
-    """Display temperature"""
-    display.print("{:4.0f}".format(temperature))
-    display.colons[0] = False
-    display.top_left_dot = False
+async def update_display():
+    """Cycle through time, and temperature"""
+    while True:
+        # display time
 
-def displayConditions():
-    display.print(conditions[:4])
-    display.colons[0] = False
-    display.top_left_dot = False
+        display_time()
+        await asyncio.sleep(1)
+        
+        display_time(False)
+        await asyncio.sleep(1)
+
+        if not is_do_not_distrub():
+            display_time()
+            await asyncio.sleep(1)
+
+            # display temperature
+            display.print("{:4.0f}".format(temperature))
+            display.colons[0] = False
+            display.top_left_dot = False
+            await asyncio.sleep(3)
+
+async def handle_http_requests():
+    """Run the web server"""
+    while True:
+        # Process any waiting requests
+        server.poll()
+        await asyncio.sleep(0)
+
+async def main():
+    """Main entry point"""
+
+    weather_task = asyncio.create_task(get_open_weather())
+    ntp_task = asyncio.create_task(get_ntp_time())
+    display_task = asyncio.create_task(update_display())
+    http_task = asyncio.create_task(handle_http_requests())
+    await asyncio.gather(weather_task, ntp_task, display_task, http_task)
 
 # Setup
 program_uptime = time.monotonic()
@@ -150,53 +153,13 @@ location = os.getenv("LOCATION")
 units = os.getenv("UNITS")
 apikey = os.getenv("APIKEY")
 
-print("Connecting to WiFi")
-#  connect to your SSID
-try:
-    wifi.radio.connect(os.getenv("CIRCUITPY_WIFI_SSID"), os.getenv("CIRCUITPY_WIFI_PASSWORD"))
-except:
-    display.print('WiFi')
-    time.sleep(60)
-    import supervisor
-    supervisor.reload() 
-print("Connected to WiFi")
-
-#  prints IP address to REPL
-print("My IP address is", wifi.radio.ipv4_address)
-
 pool = socketpool.SocketPool(wifi.radio)
 ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
 requests = adafruit_requests.Session(pool, ssl_context)
-server = Server(pool, "/static", debug=True)
-server.start(str(wifi.radio.ipv4_address))
-
-# get weather data including timezone
-if getWeather() == False:
-    display.print('Err')
-    time.sleep(60)
-    import supervisor
-    supervisor.reload()
-#setBrightness()
-
-# set time
-if GetNTPTime() == False:
-    display.print('Time')
-    time.sleep(60)
-    import supervisor
-    supervisor.reload()
-
-# flag for "flipping" colon
-colon = True
-
-# elapsed time counters for display and weather
-last_monotonic = time.monotonic()
-current_display = 0
-display_counter = 0
-weather_counter = 0
-ntp_counter = 0
+server = Server(pool, debug=True)
 
 @server.route("/")
-def base(request: Request):
+def base(request: Request) -> Response:
     info = """
 <style>
 table {
@@ -215,65 +178,29 @@ tr:nth-child(even) {
 </style>"""
     info += f'<table><tr><td>System:</td><td>{sys.implementation._machine}</td></tr>'
     info += f'<tr><td>Version:</td><td>{sys.version}</td></tr>'
-    info += f'<tr><td>Temperature:</td><td>{microcontroller.cpu.temperature} deg C</td></tr>'
     info += f'<tr><td>Frequency:</td><td>{microcontroller.cpu.frequency/1000000} MHz</td></tr>'
     info += f'<tr><td>Reset reason:</td><td>{microcontroller.cpu.reset_reason}</td></tr>'
     info += f'<tr><td>Hostname:</td><td>{wifi.radio.hostname}</td></tr>'
     info += f'<tr><td>Channel:</td><td>{wifi.radio.ap_info.channel}</td></tr>'
     info += f'<tr><td>Power:</td><td>{wifi.radio.tx_power} dBm</td></tr>'
     info += f'<tr><td>RSSI:</td><td>{wifi.radio.ap_info.rssi} dBm</td></tr>'
-    info += f'<tr><td>Current time:</td><td>{getFormattedTime(time.time())}</td></tr>'
-    info += f'<tr><td>Last NTP:</td><td>{getFormattedTime(last_ntp)}</td></tr>'
+    info += f'<tr><td>Current time:</td><td>{get_formatted_time(time.time())}</td></tr>'
+    info += f'<tr><td>Last NTP:</td><td>{get_formatted_time(last_ntp)}</td></tr>'
     info += f'<tr><td>Brightness:</td><td>{display.brightness}</td></tr>'
-    info += f'<tr><td>Do not distrub:</td><td>{isDoNotDistrub()}</td></tr>'
-    info += f'<tr><td>System uptime:</td><td>{getUptime(time.monotonic())}</td></tr>'
-    info += f'<tr><td>Program uptime:</td><td>{getUptime(time.monotonic() - program_uptime)}</td></tr>'
+    info += f'<tr><td>Do not distrub:</td><td>{is_do_not_distrub()}</td></tr>'
+    info += f'<tr><td>System uptime:</td><td>{get_uptime(time.monotonic())}</td></tr>'
+    info += f'<tr><td>Program uptime:</td><td>{get_uptime(time.monotonic() - program_uptime)}</td></tr>'
     info += f'<tr><td>Heap alloc:</td><td>{round(gc.mem_alloc()/1024)} kb</td></tr>'
     info += f'<tr><td>Heap free:</td><td>{round(gc.mem_free()/1024)} kb</td></tr>'
     info += f'<tr><td>Location:</td><td>{location}</td></tr>'
-    info += f'<tr><td>Last Open Weather:</td><td>{getFormattedTime(last_weather)}</td></tr>'
-    info += f'<tr><td>Sunrise:</td><td>{getFormattedTime(sunrise+timezone)}</td></tr>'
-    info += f'<tr><td>Sunset:</td><td>{getFormattedTime(sunset+timezone)}</td></tr>'
+    info += f'<tr><td>Last Open Weather:</td><td>{get_formatted_time(last_weather)}</td></tr>'
+    info += f'<tr><td>Sunrise:</td><td>{get_formatted_time(sunrise+timezone)}</td></tr>'
+    info += f'<tr><td>Sunset:</td><td>{get_formatted_time(sunset+timezone)}</td></tr>'
     info += '<tr><td>Open Weather data:</td><td>'
     info += str(weather_data)
     info += '</td></tr></table>'
     return Response(request, info, content_type='text/html')
 
-# Loop
-while True:
-    # one second counter
-    if time.monotonic() - last_monotonic >= 1:
-        last_monotonic = time.monotonic()
-        colon = not colon
-        display_counter += 1
-        weather_counter += 1
-        ntp_counter += 1
+server.start(str(wifi.radio.ipv4_address))
     
-    # update time every 24 hours
-    if ntp_counter >= 86400:
-        ntp_counter = 0
-        GetNTPTime()
-
-    # change display every 3 seconds
-    if display_counter >= 3:
-        display_counter = 0
-        current_display += 1
-
-    # get weather data and set brightness every 5 minutes
-    if weather_counter >= 300:
-        weather_counter = 0
-        getWeather()
-        #setBrightness()
-
-    # reset display
-    if current_display > 1:
-        current_display = 0
-
-    # display time, temperature and conditions
-    if current_display == 0 or isDoNotDistrub(): # or display.brightness == 0.0:
-        displayTime()
-    elif current_display == 1:
-        displayTemperature()
-    # else:
-    #     displayConditions()
-    pool_result = server.poll()
+asyncio.run(main())
